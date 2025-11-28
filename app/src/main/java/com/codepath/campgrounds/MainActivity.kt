@@ -1,14 +1,19 @@
 package com.codepath.campgrounds
 
+import com.codepath.campgrounds.CampgroundApplication
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.codepath.campgrounds.databinding.ActivityMainBinding
 import com.codepath.asynchttpclient.AsyncHttpClient
+import com.codepath.asynchttpclient.RequestHeaders
 import com.codepath.asynchttpclient.callback.JsonHttpResponseHandler
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import org.json.JSONException
@@ -25,53 +30,104 @@ private val CAMPGROUNDS_URL =
     "https://developer.nps.gov/api/v1/campgrounds?api_key=${PARKS_API_KEY}"
 
 class MainActivity : AppCompatActivity() {
+
+    private val campgrounds = mutableListOf<Campground>()
     private lateinit var campgroundsRecyclerView: RecyclerView
     private lateinit var binding: ActivityMainBinding
-
-    // TODO: Create campgrounds list
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
-        val view = binding.root
-        setContentView(view)
+        setContentView(binding.root)
 
-        campgroundsRecyclerView = findViewById(R.id.campgrounds)
+        // Set up RecyclerView
+        campgroundsRecyclerView = binding.campgrounds
+        val campgroundAdapter = CampgroundAdapter(this, campgrounds)
+        campgroundsRecyclerView.adapter = campgroundAdapter
+        campgroundsRecyclerView.layoutManager = LinearLayoutManager(this)
 
-        // TODO: Set up CampgroundAdapter with campgrounds
+        campgroundsRecyclerView.addItemDecoration(
+            DividerItemDecoration(
+                this,
+                (campgroundsRecyclerView.layoutManager as LinearLayoutManager).orientation
+            )
+        )
 
+        // ================================
+        // ⭐ STEP 7: LOAD ITEMS FROM DATABASE (Flow)
+        // ================================
+        lifecycleScope.launch {
+            (application as CampgroundApplication).db.campgroundDao().getAll().collect { databaseList ->
+                val mappedList = databaseList.map { entity ->
+                    Campground(
+                        entity.name,
+                        entity.description,
+                        entity.latLong,
+                        listOf(CampgroundImage(entity.imageUrl, null))
+                    )
+                }
 
-        campgroundsRecyclerView.layoutManager = LinearLayoutManager(this).also {
-            val dividerItemDecoration = DividerItemDecoration(this, it.orientation)
-            campgroundsRecyclerView.addItemDecoration(dividerItemDecoration)
+                campgrounds.clear()
+                campgrounds.addAll(mappedList)
+                campgroundAdapter.notifyDataSetChanged()
+            }
         }
 
+        // ============= API REQUEST =============
         val client = AsyncHttpClient()
-        client.get(CAMPGROUNDS_URL, object : JsonHttpResponseHandler() {
-            override fun onFailure(
-                statusCode: Int,
-                headers: Headers?,
-                response: String?,
-                throwable: Throwable?
-            ) {
-                Log.e(TAG, "Failed to fetch campgrounds: $statusCode")
-            }
 
-            override fun onSuccess(statusCode: Int, headers: Headers, json: JSON) {
-                Log.i(TAG, "Successfully fetched campgrounds: $json")
-                try {
-                    // TODO: Create the parsedJSON
+        // Correct header object
+        val headers = RequestHeaders()
+        headers["User-Agent"] = "CampgroundExplorerApp"
 
-                    // TODO: Do something with the returned json (contains campground information)
+        client.get(
+            CAMPGROUNDS_URL,
+            headers,
+            null,
+            object : JsonHttpResponseHandler() {
 
-                    // TODO: Save the campgrounds and reload the screen
+                override fun onFailure(
+                    statusCode: Int,
+                    headers: Headers?,
+                    response: String?,
+                    throwable: Throwable?
+                ) {
+                    Log.e(TAG, "Failed to fetch campgrounds: $statusCode")
+                }
 
-                } catch (e: JSONException) {
-                    Log.e(TAG, "Exception: $e")
+                override fun onSuccess(statusCode: Int, headers: Headers, json: JSON) {
+                    Log.i(TAG, "Successfully fetched campgrounds")
+
+                    try {
+                        val parsedJson = createJson().decodeFromString(
+                            CampgroundResponse.serializer(),
+                            json.jsonObject.toString()
+                        )
+
+                        parsedJson.data?.let { list ->
+                            lifecycleScope.launch(IO) {
+                                (application as CampgroundApplication).db.campgroundDao().deleteAll()
+                                (application as CampgroundApplication).db.campgroundDao().insertAll(
+                                    list.map {
+                                        CampgroundEntity(
+                                            name = it.name,
+                                            description = it.description,
+                                            latLong = it.latLong,
+                                            imageUrl = it.imageUrl
+                                        )
+                                    }
+                                )
+                            }
+                        }
+
+                    } catch (e: JSONException) {
+                        Log.e(TAG, "JSON Exception: $e")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Parsing error: $e")
+                    }
                 }
             }
-
-        })
+        )
     }
 }
